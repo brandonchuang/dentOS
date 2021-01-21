@@ -92,7 +92,7 @@ enum cpld_type {
 };
 
 enum as4224_platform_id {
-    AS4224_48X,
+    AS5114_48X,
     AS4224_52P,
     AS4224_52T,
     AS4224_52T_DAC,
@@ -518,7 +518,7 @@ static int get_platform_id(struct i2c_client *client)
         return AS4224_52T_DAC;
     }
     else if (status & 0x80) {
-        return AS4224_48X;
+        return AS5114_48X;
     }
     else {
         return AS4224_52P;
@@ -551,7 +551,7 @@ static ssize_t show_present_all(struct device *dev, struct device_attribute *da,
     mutex_unlock(&data->update_lock);
 
     /* Return values in order */
-    if (data->platform_id == AS4224_48X) {
+    if (data->platform_id == AS5114_48X) {
         return sprintf(buf, "%.2x %.2x %.2x %.2x %.2x %.2x\n", values[0], values[1],
                                                                values[2], values[3],
                                                                values[4], values[5]);
@@ -571,8 +571,11 @@ static ssize_t show_rxlos_all(struct device *dev, struct device_attribute *da,
     int i, status;
     u8 values[6]  = {0};
     u8 regs_52x[] = {0x40};
+    u8 regs_mask_52x[] = {0x36};
     u8 regs_48x[] = {0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB};
+    u8 regs_mask_48x[] = {0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB};
     u8 *regs[] = {regs_48x, regs_52x, regs_52x, regs_52x};
+    u8 *regs_mask[] = {regs_mask_48x, regs_mask_52x, regs_mask_52x, regs_mask_52x};
     u8  size[] = {ARRAY_SIZE(regs_48x), ARRAY_SIZE(regs_52x), ARRAY_SIZE(regs_52x), ARRAY_SIZE(regs_52x)};
     struct i2c_client *client = to_i2c_client(dev);
     struct as4224_cpld_data *data = i2c_get_clientdata(client);
@@ -580,6 +583,12 @@ static ssize_t show_rxlos_all(struct device *dev, struct device_attribute *da,
     mutex_lock(&data->update_lock);
 
     for (i = 0; i < size[data->platform_id]; i++) {
+        /* Enable the interrupt to CPU */
+        status = as4224_cpld_write_internal(client, regs_mask[data->platform_id][i], 0);
+        if (unlikely(status < 0)) {
+            goto exit;
+        }
+
         status = as4224_cpld_read_internal(client, regs[data->platform_id][i]);
         if (status < 0) {
             goto exit;
@@ -591,7 +600,7 @@ static ssize_t show_rxlos_all(struct device *dev, struct device_attribute *da,
     mutex_unlock(&data->update_lock);
 
     /* Return values in order */
-    if (data->platform_id == AS4224_48X) {
+    if (data->platform_id == AS5114_48X) {
         return sprintf(buf, "%.2x %.2x %.2x %.2x %.2x %.2x\n", values[0], values[1],
                                                                values[2], values[3],
                                                                values[4], values[5]);
@@ -722,6 +731,34 @@ static ssize_t show_module_48x(struct device *dev, struct device_attribute *da,
     }
 
     mutex_lock(&data->update_lock);
+    if (attr->index >= MODULE_TXFAULT_1 && attr->index <= MODULE_TXFAULT_48) {
+        int reg_mask = 0xB0 + ((attr->index - MODULE_TXFAULT_1) / 8);
+        status = as4224_cpld_read_internal(client, reg_mask);
+        if (unlikely(status < 0)) {
+            goto exit;
+        }
+
+        /* Enable the interrupt to CPU */
+        status = as4224_cpld_write_internal(client, reg_mask, status & (~mask));
+        if (unlikely(status < 0)) {
+            goto exit;
+        }
+    }
+
+    if (attr->index >= MODULE_RXLOS_1 && attr->index <= MODULE_RXLOS_48) {
+        int reg_mask = 0xB6 + ((attr->index - MODULE_RXLOS_1) / 8);
+        status = as4224_cpld_read_internal(client, reg_mask);
+        if (unlikely(status < 0)) {
+            goto exit;
+        }
+
+        /* Enable the interrupt to CPU */
+        status = as4224_cpld_write_internal(client, reg_mask, status & (~mask));
+        if (unlikely(status < 0)) {
+            goto exit;
+        }
+    }
+
     status = as4224_cpld_read_internal(client, reg);
     if (unlikely(status < 0)) {
         goto exit;
@@ -744,7 +781,7 @@ static ssize_t show_module_52x(struct device *dev, struct device_attribute *da,
     int status = 0;
     u8 reg = 0, mask = 0, invert = 0;
 
-    if (data->platform_id == AS4224_48X) {
+    if (data->platform_id == AS5114_48X) {
         return show_module_48x(dev, da, buf);
     }
 
@@ -760,7 +797,7 @@ static ssize_t show_module_52x(struct device *dev, struct device_attribute *da,
         break;
     case MODULE_TXFAULT_49 ... MODULE_TXFAULT_52:
         reg  = 0x40;
-        mask = 0x10 << (attr->index - MODULE_PRESENT_49);
+        mask = 0x10 << (attr->index - MODULE_TXFAULT_49);
         break;
     case MODULE_TXDISABLE_49 ... MODULE_TXDISABLE_52:
         reg  = 0x42;
@@ -771,6 +808,20 @@ static ssize_t show_module_52x(struct device *dev, struct device_attribute *da,
     }
 
     mutex_lock(&data->update_lock);
+    if ((attr->index >= MODULE_TXFAULT_49 && attr->index <= MODULE_TXFAULT_52) ||
+        (attr->index >= MODULE_TXDISABLE_49 && attr->index <= MODULE_TXDISABLE_52)) {
+        status = as4224_cpld_read_internal(client, 0x36);
+        if (unlikely(status < 0)) {
+            goto exit;
+        }
+
+        /* Enable the interrupt to CPU */
+        status = as4224_cpld_write_internal(client, 0x36, status & (~mask));
+        if (unlikely(status < 0)) {
+            goto exit;
+        }
+    }
+
     status = as4224_cpld_read_internal(client, reg);
     if (unlikely(status < 0)) {
         goto exit;
@@ -794,10 +845,10 @@ static ssize_t show_module(struct device *dev, struct device_attribute *da,
 
     switch (attr->index) {
     case MODULE_INDEX_BEGIN:
-        ret = (data->platform_id == AS4224_48X) ? 1: 49;
+        ret = (data->platform_id == AS5114_48X) ? 1: 49;
         break;
     case MODULE_COUNT:
-        ret = (data->platform_id == AS4224_48X) ? 48: 4;
+        ret = (data->platform_id == AS5114_48X) ? 48: 4;
         break;
     default:
         return 0;
@@ -986,7 +1037,7 @@ static ssize_t set_control_52x(struct device *dev, struct device_attribute *da,
     int status;
     u8 reg = 0, mask = 0;
 
-    if (data->platform_id == AS4224_48X) {
+    if (data->platform_id == AS5114_48X) {
         return set_control_48x(dev, da, buf, count);
     }
 
@@ -1274,7 +1325,7 @@ static int as4224_cpld_probe(struct i2c_client *client,
     struct as4224_cpld_data *data;
     int ret = -ENODEV;
     int i   = 0;
-    u64 port_map[4] = { [AS4224_48X]     = 0xFFFFFFFFFFFF,
+    u64 port_map[4] = { [AS5114_48X]     = 0xFFFFFFFFFFFF,
                         [AS4224_52P]     = 0xF000000000000,
                         [AS4224_52T]     = 0xF000000000000,
                         [AS4224_52T_DAC] = 0xF000000000000};
